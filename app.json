@@ -7,13 +7,15 @@
     "icon": "./assets/images/icon.png",
     "scheme": "crackapp",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tayyabahmad44.crackapp"
     },
     "android": {
       "permissions": [
-        "CAMERA"
+        "CAMERA",
+        "android.permission.CAMERA"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -43,7 +45,6 @@
           }
         }
       ],
-      "expo-barcode-scanner",
       "expo-font",
       "expo-web-browser"
     ],
