@@ -4,6 +4,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ActivityIndicator, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { getApiUrl } from '../../utils/api';
 
+interface Batch {
+  id: string;
+  photos: any[];
+  response?: any;
+  processing?: boolean;
+}
+
 export default function HomeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView | null>(null);
@@ -11,6 +18,7 @@ export default function HomeScreen() {
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [capturedPhotos, setCapturedPhotos] = useState<any[]>([]);
+  const [batches, setBatches] = useState<Batch[]>([]);
   const [serverResponse, setServerResponse] = useState<any>(null);
 
   useEffect(() => {
@@ -30,6 +38,7 @@ export default function HomeScreen() {
 
   const clearAll = useCallback(() => {
     setCapturedPhotos([]);
+    setBatches([]);
     setServerResponse(null);
     setIsProcessing(false);
     setIsCameraOpen(false);
@@ -47,48 +56,25 @@ export default function HomeScreen() {
     }
   }, []);
 
-  const onFinish = useCallback(async () => {
+  const saveBatch = useCallback(async () => {
+    if (capturedPhotos.length === 0) {
+      return;
+    }
+
+    const batchId = `batch_${Date.now()}`;
+    const newBatch: Batch = {
+      id: batchId,
+      photos: [...capturedPhotos],
+      processing: true,
+    };
+
+    setBatches(prev => [...prev, newBatch]);
+    setCapturedPhotos([]);
+
     try {
-      closeCamera();
-      setIsProcessing(true);
-      
-      if (capturedPhotos.length === 0) {
-        setServerResponse({ 
-          status: 'error',
-          message: 'No photos captured. Please take some photos first.',
-        });
-        setIsProcessing(false);
-        return;
-      }
-
       const apiUrl = getApiUrl('/detect-cracks');
-      const testMode = false;
-
-      if (testMode) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        const mockResponse = {
-          status: 'success',
-          images_processed: capturedPhotos.length,
-          results: capturedPhotos.map((photo, index) => ({
-            filename: `image_${index}.jpg`,
-            overlay_image_id: `mock_overlay_${index}`,
-            overlay_image_url: `/image/mock_overlay_${index}`,
-            cracks_detected: Math.floor(Math.random() * 5),
-            crack_details: [
-              { label: 'C1L1', area: 100, perimeter: 50 },
-              { label: 'C2L2', area: 200, perimeter: 80 }
-            ]
-          })),
-          crack_map_id: 'mock_crack_map',
-          crack_map_url: '/image/mock_crack_map'
-        };
-        setServerResponse(mockResponse);
-        setIsProcessing(false);
-        return;
-      }
-
       const formData = new FormData();
-      capturedPhotos.forEach((photo, index) => {
+      newBatch.photos.forEach((photo, index) => {
         formData.append('files', {
           uri: photo.uri,
           type: 'image/jpeg',
@@ -116,7 +102,11 @@ export default function HomeScreen() {
         }
 
         const data = await response.json();
-        setServerResponse(data);
+        setBatches(prev => prev.map(batch => 
+          batch.id === batchId 
+            ? { ...batch, response: data, processing: false }
+            : batch
+        ));
       } catch (fetchError) {
         clearTimeout(timeoutId);
         if (fetchError instanceof Error && fetchError.name === 'AbortError') {
@@ -125,16 +115,30 @@ export default function HomeScreen() {
         throw fetchError;
       }
     } catch (err) {
-      console.warn('Failed to finish flow', err);
-      setServerResponse({
-        status: 'error',
-        message: 'Failed to process images. Please try again.',
-        error: err instanceof Error ? err.message : 'Unknown error'
-      });
-    } finally {
-      setIsProcessing(false);
+      console.warn('Failed to save batch', err);
+      setBatches(prev => prev.map(batch => 
+        batch.id === batchId 
+          ? { 
+              ...batch, 
+              response: {
+                status: 'error',
+                message: 'Failed to process batch. Please try again.',
+                error: err instanceof Error ? err.message : 'Unknown error'
+              }, 
+              processing: false 
+            }
+          : batch
+      ));
     }
-  }, [closeCamera, capturedPhotos]);
+  }, [capturedPhotos]);
+
+  const onFinish = useCallback(() => {
+    closeCamera();
+    // If there are photos in current batch, save it first
+    if (capturedPhotos.length > 0) {
+      saveBatch();
+    }
+  }, [closeCamera, capturedPhotos, saveBatch]);
 
   const hasPermission = permission?.granted ?? false;
   const needsPermission = permission && !permission.granted && !permission.canAskAgain;
@@ -175,6 +179,11 @@ export default function HomeScreen() {
             <TouchableOpacity onPress={onTakePhoto} style={styles.shutterButton}>
               <Text style={styles.shutterButtonText}>Capture</Text>
             </TouchableOpacity>
+            {capturedPhotos.length > 0 && (
+              <TouchableOpacity onPress={saveBatch} style={styles.saveBatchButton}>
+                <Text style={styles.saveBatchButtonText}>Save Batch ({capturedPhotos.length})</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity onPress={onFinish} style={styles.finishButton}>
               <Text style={styles.finishButtonText}>Finish</Text>
             </TouchableOpacity>
@@ -182,66 +191,83 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {!!capturedPhotos.length && !isCameraOpen && !isProcessing && !serverResponse && (
-        <ScrollView horizontal style={styles.thumbnailBar} contentContainerStyle={styles.thumbnailBarContent}>
-          {capturedPhotos.map((p, idx) => (
-            <View key={`${p.uri}-${idx}`} style={styles.thumb}>
-              <View style={styles.thumbInner} />
+      {!!capturedPhotos.length && !isCameraOpen && (
+        <View style={styles.currentBatchContainer}>
+          <Text style={styles.batchLabel}>Current Batch: {capturedPhotos.length} photos</Text>
+          <ScrollView horizontal style={styles.thumbnailBar} contentContainerStyle={styles.thumbnailBarContent}>
+            {capturedPhotos.map((p, idx) => (
+              <View key={`${p.uri}-${idx}`} style={styles.thumb}>
+                <View style={styles.thumbInner} />
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {batches.length > 0 && !isCameraOpen && (
+        <ScrollView style={styles.batchesContainer}>
+          <Text style={styles.batchesTitle}>Batches ({batches.length})</Text>
+          {batches.map((batch) => (
+            <View key={batch.id} style={styles.batchCard}>
+              <Text style={styles.batchCardTitle}>
+                Batch {batch.id.split('_')[1].slice(-6)} - {batch.photos.length} photos
+              </Text>
+              {batch.processing ? (
+                <View style={styles.batchProcessing}>
+                  <ActivityIndicator size="small" />
+                  <Text style={styles.batchProcessingText}>Processing...</Text>
+                </View>
+              ) : batch.response ? (
+                <View style={styles.batchResult}>
+                  {batch.response.status === 'success' ? (
+                    <>
+                      <Text style={styles.batchSuccessText}>
+                        ✅ Processed: {batch.response.images_processed} images
+                      </Text>
+                      <TouchableOpacity
+                        style={styles.batchResultButton}
+                        onPress={() => router.push({
+                          pathname: '/results-selection',
+                          params: {
+                            results: JSON.stringify(batch.response),
+                            type: 'detection'
+                          }
+                        })}
+                      >
+                        <Text style={styles.batchResultButtonText}>View Results</Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.batchErrorText}>❌ Processing failed</Text>
+                      <Text style={styles.batchErrorDetails}>{batch.response.message}</Text>
+                    </>
+                  )}
+                </View>
+              ) : null}
             </View>
           ))}
         </ScrollView>
+      )}
+
+      {!isCameraOpen && batches.length > 0 && (
+        <View style={styles.clearAllContainer}>
+          <TouchableOpacity style={styles.clearAllButton} onPress={clearAll}>
+            <Text style={styles.clearAllButtonText}>Clear All Batches</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {!isCameraOpen && !serverResponse && batches.length === 0 && capturedPhotos.length === 0 && (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyStateText}>No batches yet. Start capturing images!</Text>
+        </View>
       )}
 
       {isProcessing && (
         <View style={styles.processingOverlay}>
           <ActivityIndicator size="large" />
           <Text style={styles.processingText}>Processing...</Text>
-        </View>
-      )}
-
-      {serverResponse && !isProcessing && !isCameraOpen && (
-        <View style={styles.responseContainer}>
-          {serverResponse.status === 'success' ? (
-            <>
-              <Text style={styles.successText}>✅ Images processed successfully!</Text>
-              <Text style={styles.responseText}>
-                {serverResponse.images_processed} images processed
-              </Text>
-              <View style={styles.buttonContainer}>
-                <TouchableOpacity
-                  style={styles.resultButton}
-                  onPress={() => router.push({
-                    pathname: '/results-selection',
-                    params: {
-                      results: JSON.stringify(serverResponse),
-                      type: 'detection'
-                    }
-                  })}
-                >
-                  <Text style={styles.resultButtonText}>View Results</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.clearButton}
-                  onPress={clearAll}
-                >
-                  <Text style={styles.clearButtonText}>Clear All</Text>
-                </TouchableOpacity>
-              </View>
-            </>
-          ) : (
-            <>
-              <Text style={styles.errorText}>❌ Processing failed</Text>
-              <Text style={styles.responseText}>{serverResponse.message}</Text>
-              <View style={styles.buttonContainer}>
-                <TouchableOpacity style={styles.resultButton} onPress={openCamera}>
-                  <Text style={styles.resultButtonText}>Try Again</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.clearButton} onPress={clearAll}>
-                  <Text style={styles.clearButtonText}>Clear All</Text>
-                </TouchableOpacity>
-              </View>
-            </>
-          )}
         </View>
       )}
     </View>
@@ -305,10 +331,11 @@ const styles = StyleSheet.create({
   },
   cameraControls: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 8,
     padding: 16,
-    justifyContent: 'space-between',
+    justifyContent: 'space-around',
     backgroundColor: 'rgba(0,0,0,0.7)',
+    flexWrap: 'wrap',
   },
   shutterButton: {
     backgroundColor: '#10b981',
@@ -319,6 +346,17 @@ const styles = StyleSheet.create({
   shutterButtonText: {
     color: 'white',
     fontWeight: '600',
+  },
+  saveBatchButton: {
+    backgroundColor: '#f59e0b',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+  },
+  saveBatchButtonText: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 12,
   },
   finishButton: {
     backgroundColor: '#ef4444',
@@ -425,5 +463,116 @@ const styles = StyleSheet.create({
     color: 'white',
     fontWeight: '600',
     fontSize: 16,
+  },
+  currentBatchContainer: {
+    padding: 16,
+    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e5e7eb',
+  },
+  batchLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  batchesContainer: {
+    flex: 1,
+    padding: 16,
+  },
+  batchesTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: '#1f2937',
+    marginBottom: 16,
+  },
+  batchCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  batchCardTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1f2937',
+    marginBottom: 8,
+  },
+  batchProcessing: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+  batchProcessingText: {
+    color: '#6b7280',
+    fontSize: 14,
+  },
+  batchResult: {
+    marginTop: 8,
+  },
+  batchSuccessText: {
+    color: '#10b981',
+    fontWeight: '500',
+    fontSize: 14,
+    marginBottom: 8,
+  },
+  batchErrorText: {
+    color: '#ef4444',
+    fontWeight: '500',
+    fontSize: 14,
+    marginBottom: 4,
+  },
+  batchErrorDetails: {
+    color: '#6b7280',
+    fontSize: 12,
+  },
+  batchResultButton: {
+    backgroundColor: '#3b82f6',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginTop: 8,
+    alignItems: 'center',
+  },
+  batchResultButtonText: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  emptyState: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 32,
+  },
+  emptyStateText: {
+    color: '#6b7280',
+    fontSize: 16,
+    textAlign: 'center',
+  },
+  clearAllContainer: {
+    padding: 16,
+    alignItems: 'center',
+  },
+  clearAllButton: {
+    backgroundColor: '#ef4444',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    minWidth: 200,
+    alignItems: 'center',
+  },
+  clearAllButtonText: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 14,
   },
 });
